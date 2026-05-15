@@ -21,5 +21,11 @@ service cloud.firestore {
         && request.resource.data.items.size() <= 50;
       allow update, delete: if false;
     }
+
+    // Global online PvP lobby (single room; max 10 participants enforced in app)
+    match /onlinePvpLobby/{lobbyId}/participants/{userId} {
+      allow read: if request.auth != null;
+      allow create, update, delete: if request.auth != null && request.auth.uid == userId;
+    }
   }
 }

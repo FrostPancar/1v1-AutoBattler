@@ -391,7 +391,7 @@
     <canvas id="glslCanvas" class="fullscreen-bg"></canvas>
     <div id="shaderOverlay" class="fullscreen-bg" style="background: rgba(0,0,0,0.10)"></div>
 
-    <div id="fighters" class="flex flex-col md:flex-row justify-center items-stretch w-full max-w-4xl gap-6 my-8">
+    <div id="fighters" class="flex flex-col md:flex-row justify-center items-stretch w-full max-w-4xl gap-6 my-8" data-online-swap="0">
         <!-- Player 1 -->
         <div id="fighter1" class="fighter flex-1 bg-white p-6 rounded-xl shadow-lg border border-gray-200 flex flex-col items-center transform transition-transform duration-300 relative">
             <div id="campaignLives" class="absolute top-2 left-3 text-2xl select-none" style="display:none">❤️❤️</div>
@@ -480,10 +480,19 @@
         </div>
     </div>
     <!-- PvP Controls (only visible after PvP is selected) -->
-    <div id="pvpControls" class="w-full max-w-3xl mx-auto flex gap-3 justify-center mb-3" style="display:none">
+    <div id="pvpControls" class="w-full max-w-3xl mx-auto flex flex-wrap gap-3 justify-center mb-3 items-center" style="display:none">
         <button onclick="startBattle()" id="startButton" class="btn-gradient-blue text-white font-bold py-3 px-6 rounded-full shadow-lg transition duration-300 ease-in-out transform hover:scale-105 focus:outline-none focus:ring-4 focus:ring-blue-300">Start Battle</button>
         <button onclick="resetGame()" id="resetButton" class="btn-gradient-gray text-white font-bold py-3 px-6 rounded-full shadow-lg transition duration-300 ease-in-out transform hover:scale-105 focus:outline-none focus:ring-4 focus:ring-gray-300">Reset Battle</button>
+        <button type="button" id="onlinePvpToggleBtn" class="btn-gradient-emerald text-white font-bold py-3 px-6 rounded-full shadow-lg transition duration-300 ease-in-out transform hover:scale-105 focus:outline-none focus:ring-4 focus:ring-emerald-300">Online PvP: Off</button>
         <button onclick="rematch()" id="rematchButton" class="btn-gradient-yellow text-white font-bold py-3 px-6 rounded-full shadow-lg transition duration-300 ease-in-out transform hover:scale-105 focus:outline-none focus:ring-300" style="display: none;">Rematch</button>
+    </div>
+    <div id="onlinePvpReadyRow" class="hidden w-full max-w-3xl mx-auto flex flex-col items-center gap-2 mb-4 text-center text-sm text-gray-700 dark:text-gray-300">
+        <p id="onlinePvpSlotLabel" class="font-semibold"></p>
+        <label class="inline-flex items-center gap-2 cursor-pointer select-none">
+            <input type="checkbox" id="onlineReadyCheckbox" class="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
+            <span>Ready to fight (both players must check this to start)</span>
+        </label>
+        <p id="onlinePvpPeerStatus" class="text-xs text-gray-500 dark:text-gray-400"></p>
     </div>
 
     <div id="itemSearchContainer" class="mt-6 mb-4 flex items-center justify-center" style="display:none">
@@ -611,7 +620,7 @@
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, doc, getDoc, addDoc, setDoc, onSnapshot, collection, query, deleteDoc, updateDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getFirestore, doc, getDoc, addDoc, setDoc, onSnapshot, collection, query, deleteDoc, updateDoc, getDocs, runTransaction, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
         import { getAnalytics } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-analytics.js";
 
         // --- Firebase Setup ---
@@ -668,6 +677,10 @@
                 window.getDoc = getDoc;
                 window.deleteDoc = deleteDoc;
                 window.updateDoc = updateDoc;
+                window.setDoc = setDoc;
+                window.getDocs = getDocs;
+                window.runTransaction = runTransaction;
+                window.serverTimestamp = serverTimestamp;
 
                 // Signal that Firebase is ready
                 window.firebaseReady = true;
@@ -1028,6 +1041,31 @@
         // Helper to get color class for stats
         function getStatColorClass(abbr) {
             return statColorMap[abbr] || 'text-white';
+        }
+
+        // --- Battle-synced RNG (mulberry32). Same seed + same builds => identical fight on two clients.
+        // Multiplayer: set window.__battleRngSeed to the same unsigned 32-bit integer on both machines
+        // immediately before startBattle() (e.g. from your match doc). Omit for local PvP (random seed each fight).
+        let _battleRngState = null;
+        function resetBattleRng(seed) {
+            if (seed === null || typeof seed === 'undefined') {
+                _battleRngState = null;
+                return;
+            }
+            let t = Number(seed) >>> 0;
+            if (t === 0) t = 0x9e3779b1;
+            _battleRngState = t;
+        }
+        function battleRandom() {
+            if (_battleRngState === null) return Math.random();
+            let t = (_battleRngState += 0x6d2b79f5) >>> 0;
+            t = Math.imul(t ^ (t >>> 15), t | 1);
+            t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+            return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        }
+        function battleRandomInt(maxExclusive) {
+            if (!maxExclusive || maxExclusive <= 0) return 0;
+            return Math.floor(battleRandom() * maxExclusive);
         }
 
         // Helper for floating text
@@ -1539,6 +1577,7 @@
         }
         function showNameChangeModal(playerNum) {
             if (mode === 'campaign' && playerNum === 2) return; // block renaming P2 in campaign
+            if (window.onlinePvpActive && playerNum !== __onlineMySlot) return;
             currentPlayerToRename = playerNum;
             const modal = document.getElementById('nameChangeModal');
             const nameInput = document.getElementById('newNameInput');
@@ -1625,10 +1664,13 @@
                                 }
                             }
                             if (playerNum === 1) {
-                                window.p1PanelColorChoice = c.reset ? null : c; // persist in session
+                                window.p1PanelColorIdxOnline = idx;
+                                window.p1PanelColorChoice = c.reset ? null : c;
                             } else {
-                                window.p2PanelColorChoice = c.reset ? null : c; // persist in session
+                                window.p2PanelColorIdxOnline = idx;
+                                window.p2PanelColorChoice = c.reset ? null : c;
                             }
+                            if (window.onlinePvpActive) scheduleOnlinePush();
                         };
                         opts.appendChild(btn);
                     });
@@ -1651,15 +1693,28 @@
                 updateStats(currentPlayerToRename === 1 ? p1 : p2, currentPlayerToRename);
             }
             hideNameChangeModal();
+            if (window.onlinePvpActive) scheduleOnlinePush();
         });
 
-        document.getElementById('player1Name').addEventListener('click', () => showNameChangeModal(1));
+        document.getElementById('player1Name').addEventListener('click', () => {
+            if (window.onlinePvpActive && __onlineMySlot !== 1) return;
+            showNameChangeModal(1);
+        });
         document.getElementById('player2Name').addEventListener('click', () => {
             if (mode === 'campaign') return; // prevent renaming monsters in Campaign
+            if (window.onlinePvpActive && __onlineMySlot !== 2) return;
             showNameChangeModal(2);
         });
 
         function openPresetsModal(playerNum) {
+            if (window.onlinePvpActive && !__onlineMySlot) {
+                showToast('Spectators cannot open presets.', 'error');
+                return;
+            }
+            if (window.onlinePvpActive && __onlineMySlot && playerNum !== __onlineMySlot) {
+                showToast('Presets are only available for your panel online.', 'error');
+                return;
+            }
             currentPlayerForPreset = playerNum;
             const modal = document.getElementById('presetsModal');
             
@@ -2241,13 +2296,18 @@
 
 
         function applyPreset(playerNum, presetItemsNames) {
+            if (window.onlinePvpActive && __onlineMySlot && playerNum !== __onlineMySlot) {
+                showToast('You can only load presets for your panel online.', 'error');
+                return;
+            }
             const player = playerNum === 1 ? p1 : p2;
             const playerName = playerNum === 1 ? p1Name : p2Name;
 
             player.inv = [];
+            const cap = window.onlinePvpActive ? ONLINE_ITEM_COUNT : MAX_ITEMS_PER_PLAYER;
             presetItemsNames.forEach(itemName => {
                 const item = itemsList.find(i => i.name === itemName);
-                if (item && player.inv.length < MAX_ITEMS_PER_PLAYER) {
+                if (item && player.inv.length < cap) {
                     player.inv.push(item);
                 }
             });
@@ -2256,6 +2316,7 @@
             renderItems();
             log(`${playerName} applied a preset build.`);
             hidePresetsModal();
+            if (window.onlinePvpActive) scheduleOnlinePush();
         }
 
         function renderMonstersList() {
@@ -2602,6 +2663,32 @@
                 showToast('Item selection is disabled in Campaign mode.', 'error');
                 return;
             }
+            if (window.onlinePvpActive && __onlineMySlot) {
+                const selectedItem = itemsList[index];
+                const itemButton = document.getElementById(`item-btn-${index}`);
+                const targetNum = __onlineMySlot;
+                const player = targetNum === 1 ? p1 : p2;
+                const playerName = targetNum === 1 ? p1Name : p2Name;
+                const has = player.inv.some(item => item.name === selectedItem.name);
+                if (has) {
+                    player.inv = player.inv.filter(item => item.name !== selectedItem.name);
+                    updateStats(player, targetNum);
+                    log(`${playerName} dropped ${selectedItem.name}`);
+                    if (itemButton) itemButton.classList.remove('item-selected');
+                } else {
+                    if (player.inv.length >= ONLINE_ITEM_COUNT) {
+                        showToast(`Online PvP: max ${ONLINE_ITEM_COUNT} items.`, 'error');
+                        return;
+                    }
+                    player.inv.push(selectedItem);
+                    updateStats(player, targetNum);
+                    log(`${playerName} picked up ${selectedItem.name}`);
+                    if (itemButton) itemButton.classList.add('item-selected');
+                }
+                renderItems();
+                scheduleOnlinePush();
+                return;
+            }
             const selectedItem = itemsList[index];
             const itemButton = document.getElementById(`item-btn-${index}`);
             
@@ -2659,6 +2746,10 @@
                 showToast('Randomize is disabled in Campaign mode.', 'error');
                 return;
             }
+            if (window.onlinePvpActive && __onlineMySlot && playerNum !== __onlineMySlot) {
+                showToast('You can only randomize your own panel online.', 'error');
+                return;
+            }
             let player = playerNum === 1 ? p1 : p2;
             let playerName = playerNum === 1 ? p1Name : p2Name;
 
@@ -2688,6 +2779,7 @@
             }
             updateStats(player, playerNum);
             log(`${playerName} randomized items: ${player.inv.map(i => i.name).join(', ')}`);
+            if (window.onlinePvpActive) scheduleOnlinePush();
         }
         function log(message) {
             const logDiv = document.getElementById('log');
@@ -2747,6 +2839,358 @@
         let campaignNextFightBuff = { atk: 0, def: 0, spd: 0, maxHp: 0, reg: 0 };
         // List of monsters to hide from the Monsters tab (can be modified at runtime)
         window.monstersHidden = window.monstersHidden || ['Test','Demon Lord','Void Serpent','Time Reaver','Cosmic Horror','Abyssal Deity','Primordial Colossus','Infinity Warden','Paradox Dragon','Oblivion Incarnate','Eternal Emperor'];
+
+        // === Online PvP: single global lobby (max 10 participants; join order → User1 / User2) ===
+        let onlinePvpUnsubscribe = null;
+        let __onlineMySlot = 0;
+        let __onlineApplyingRemote = false;
+        let __onlineBattleLock = false;
+        let __onlineLastAutoSeed = null;
+        let __onlinePushTimer = null;
+        const ONLINE_MAX_PARTICIPANTS = 10;
+        const ONLINE_ITEM_COUNT = 4; // must match MAX_ITEMS_PER_PLAYER for online fights
+        window.p1PanelColorIdxOnline = 0;
+        window.p2PanelColorIdxOnline = 0;
+
+        const ONLINE_PANEL_REMOVE = ['bg-white','border-gray-200','dark:bg-gray-800','dark:border-gray-700',
+            'bg-emerald-50/70','border-emerald-100','dark:bg-emerald-900/30','dark:border-emerald-800',
+            'bg-sky-50/70','border-sky-100','dark:bg-sky-900/30','dark:border-sky-800',
+            'bg-violet-50/70','border-violet-100','dark:bg-violet-900/30','dark:border-violet-800',
+            'bg-amber-50/70','border-amber-100','dark:bg-amber-900/30','dark:border-amber-800',
+            'bg-rose-50/70','border-rose-100','dark:bg-rose-900/30','dark:border-rose-800'];
+        const ONLINE_PANEL_PRESETS = [
+            { reset: true },
+            { lightBg:'bg-emerald-50/70', lightBorder:'border-emerald-100', darkBg:'dark:bg-emerald-900/30', darkBorder:'dark:border-emerald-800' },
+            { lightBg:'bg-sky-50/70', lightBorder:'border-sky-100', darkBg:'dark:bg-sky-900/30', darkBorder:'dark:border-sky-800' },
+            { lightBg:'bg-violet-50/70', lightBorder:'border-violet-100', darkBg:'dark:bg-violet-900/30', darkBorder:'dark:border-violet-800' },
+            { lightBg:'bg-amber-50/70', lightBorder:'border-amber-100', darkBg:'dark:bg-amber-900/30', darkBorder:'dark:border-amber-800' },
+            { lightBg:'bg-rose-50/70', lightBorder:'border-rose-100', darkBg:'dark:bg-rose-900/30', darkBorder:'dark:border-rose-800' }
+        ];
+
+        function onlineParticipantsCollectionRef() {
+            return window.collection(window.db, 'onlinePvpLobby', 'global', 'participants');
+        }
+        function onlineParticipantDocRef(uid) {
+            return window.doc(window.db, 'onlinePvpLobby', 'global', 'participants', uid);
+        }
+        function onlineFnv1a32(str) {
+            let h = 2166136261 >>> 0;
+            const s = String(str || '');
+            for (let i = 0; i < s.length; i++) {
+                h ^= s.charCodeAt(i);
+                h = Math.imul(h, 16777619) >>> 0;
+            }
+            return h >>> 0;
+        }
+        function onlineComputeBattleSeed(a, b) {
+            const u1 = a.joinedAt <= b.joinedAt ? a : b;
+            const u2 = a.joinedAt <= b.joinedAt ? b : a;
+            const pack = [u1.uid, u2.uid, (u1.itemNames || []).join(','), (u2.itemNames || []).join(',')].join('|');
+            const s = onlineFnv1a32(pack);
+            return s === 0 ? 0xfeedface : s;
+        }
+        function onlineApplyPanelVisual(playerNum, panelIdx) {
+            const c = ONLINE_PANEL_PRESETS[Math.max(0, Math.min(ONLINE_PANEL_PRESETS.length - 1, panelIdx | 0))];
+            const targetIds = (playerNum === 1) ? ['fighter1'] : ['fighter2'];
+            const toAdd = c.reset ? ['bg-white','border-gray-200','dark:bg-gray-800','dark:border-gray-700'] : [c.lightBg, c.lightBorder, c.darkBg, c.darkBorder];
+            targetIds.forEach(id => {
+                const panel = document.getElementById(id);
+                if (!panel) return;
+                ONLINE_PANEL_REMOVE.forEach(cls => panel.classList.remove(cls));
+                panel.classList.add('border');
+                toAdd.filter(Boolean).forEach(token => token.split(' ').forEach(cls => panel.classList.add(cls)));
+                if (!c.reset) {
+                    panel.classList.add('backdrop-blur-md', 'bg-white/60', 'dark:bg-gray-800/60');
+                } else {
+                    panel.classList.remove('backdrop-blur-md', 'bg-white/60', 'dark:bg-gray-800/60');
+                }
+            });
+            const nameId = (playerNum === 1) ? 'player1Name' : 'player2Name';
+            const nameEl = document.getElementById(nameId);
+            if (nameEl) {
+                const nameRemove = [
+                    'text-purple-700','dark:text-purple-400','text-green-700','dark:text-green-400',
+                    'text-emerald-700','dark:text-emerald-400','text-sky-700','dark:text-sky-400',
+                    'text-violet-700','dark:text-violet-400','text-amber-700','dark:text-amber-400','text-rose-700','dark:text-rose-400'
+                ];
+                nameRemove.forEach(cls => nameEl.classList.remove(cls));
+                const palette = (c.lightBg || '') + ' ' + (c.darkBg || '');
+                const pick = (re, lightCls, darkCls) => { if (re.test(palette)) { nameEl.classList.add(lightCls, darkCls); return true; } return false; };
+                let applied = false;
+                if (!c.reset) {
+                    applied = pick(/emerald/, 'text-emerald-700', 'dark:text-emerald-400') ||
+                              pick(/sky/, 'text-sky-700', 'dark:text-sky-400') ||
+                              pick(/violet/, 'text-violet-700', 'dark:text-violet-400') ||
+                              pick(/amber/, 'text-amber-700', 'dark:text-amber-400') ||
+                              pick(/rose/, 'text-rose-700', 'dark:text-rose-400');
+                }
+                if (!applied) {
+                    if (playerNum === 1) nameEl.classList.add('text-purple-700','dark:text-purple-400');
+                    else nameEl.classList.add('text-green-700','dark:text-green-400');
+                }
+            }
+        }
+        function onlineApplyItemsFromNames(playerNum, names) {
+            const player = playerNum === 1 ? p1 : p2;
+            player.inv = [];
+            (names || []).forEach(n => {
+                const it = itemsList.find(i => i.name === n);
+                if (it && player.inv.length < ONLINE_ITEM_COUNT) player.inv.push(it);
+            });
+            updateStats(player, playerNum);
+        }
+        async function onlinePushMyParticipant(extra) {
+            if (!window.onlinePvpActive || !window.firebaseReady || !window.db || !window.auth?.currentUser) return;
+            if (!__onlineMySlot) return;
+            const uid = window.auth.currentUser.uid;
+            const slot = __onlineMySlot;
+            const displayName = slot === 2 ? p2Name : p1Name;
+            const itemNames = slot === 2 ? p2.inv.map(i => i.name) : p1.inv.map(i => i.name);
+            const panelIdx = slot === 2 ? (window.p2PanelColorIdxOnline ?? 0) : (window.p1PanelColorIdxOnline ?? 0);
+            const ready = !!(document.getElementById('onlineReadyCheckbox') && document.getElementById('onlineReadyCheckbox').checked);
+            const payload = { displayName, itemNames, panelIdx, ready, joinedAt: Date.now(), ...extra };
+            try {
+                await window.setDoc(onlineParticipantDocRef(uid), payload, { merge: true });
+            } catch (e) {
+                console.error('onlinePushMyParticipant', e);
+            }
+        }
+        function scheduleOnlinePush() {
+            if (!window.onlinePvpActive) return;
+            clearTimeout(__onlinePushTimer);
+            __onlinePushTimer = setTimeout(() => onlinePushMyParticipant({}), 220);
+        }
+        function onlineUpdateFightersLayout() {
+            const row = document.getElementById('fighters');
+            if (!row) return;
+            if (__onlineMySlot === 2) {
+                row.classList.add('md:flex-row-reverse');
+                row.dataset.onlineSwap = '1';
+            } else {
+                row.classList.remove('md:flex-row-reverse');
+                row.dataset.onlineSwap = '0';
+            }
+        }
+        function onlineSetControlsForSlot() {
+            const r1 = document.getElementById('randomize1');
+            const r2 = document.getElementById('randomize2');
+            const p1b = document.getElementById('presets1');
+            const p2b = document.getElementById('presets2');
+            const items = document.getElementById('items');
+            const slot = __onlineMySlot;
+            if (!window.onlinePvpActive) {
+                if (r1) r1.style.display = '';
+                if (r2) r2.style.display = '';
+                if (p1b) p1b.style.display = '';
+                if (p2b) p2b.style.display = '';
+                if (items) items.style.opacity = '';
+                return;
+            }
+            onlineUpdateFightersLayout();
+            if (slot === 1) {
+                if (r1) r1.style.display = 'inline-block';
+                if (r2) r2.style.display = 'none';
+                if (p1b) p1b.style.display = 'inline-block';
+                if (p2b) p2b.style.display = 'none';
+            } else if (slot === 2) {
+                if (r1) r1.style.display = 'none';
+                if (r2) r2.style.display = 'inline-block';
+                if (p1b) p1b.style.display = 'none';
+                if (p2b) p2b.style.display = 'inline-block';
+            } else {
+                if (r1) r1.style.display = 'none';
+                if (r2) r2.style.display = 'none';
+                if (p1b) p1b.style.display = 'none';
+                if (p2b) p2b.style.display = 'none';
+            }
+            const itemBtns = document.querySelectorAll('#items button');
+            if (window.onlinePvpActive && slot === 0) {
+                itemBtns.forEach(b => { b.disabled = true; });
+            } else if (window.onlinePvpActive && slot) {
+                itemBtns.forEach(b => { b.disabled = false; });
+            }
+        }
+        function onlineProcessParticipantsSnapshot(snapshot) {
+            if (!window.onlinePvpActive) return;
+            const docs = snapshot.docs.map(d => ({ ...d.data(), uid: d.id }));
+            docs.sort((a, b) => (a.joinedAt || 0) - (b.joinedAt || 0));
+            const myUid = window.auth?.currentUser?.uid;
+            const myIdx = docs.findIndex(x => x.uid === myUid);
+            const prevSlot = __onlineMySlot;
+            __onlineMySlot = myIdx === 0 ? 1 : myIdx === 1 ? 2 : 0;
+            if (prevSlot !== __onlineMySlot) onlineSetControlsForSlot();
+
+            const label = document.getElementById('onlinePvpSlotLabel');
+            const peer = document.getElementById('onlinePvpPeerStatus');
+            if (label) {
+                if (__onlineMySlot === 1) label.textContent = 'You are User 1 (left slot — synced for everyone).';
+                else if (__onlineMySlot === 2) label.textContent = 'You are User 2 (your panel is shown on the left on your screen).';
+                else if (myIdx >= 0) label.textContent = 'You are connected as a spectator (only the first two joiners can fight).';
+                else label.textContent = 'Joining lobby…';
+            }
+
+            const u1 = docs[0];
+            const u2 = docs[1];
+            __onlineApplyingRemote = true;
+            try {
+                if (u1) {
+                    const isMeP1 = (myUid && u1.uid === myUid && __onlineMySlot === 1);
+                    if (u1.displayName) p1Name = u1.displayName;
+                    if (!isMeP1) onlineApplyItemsFromNames(1, u1.itemNames);
+                    const idx = typeof u1.panelIdx === 'number' ? u1.panelIdx : 0;
+                    onlineApplyPanelVisual(1, idx);
+                }
+                if (u2) {
+                    const isMeP2 = (myUid && u2.uid === myUid && __onlineMySlot === 2);
+                    if (u2.displayName) p2Name = u2.displayName;
+                    if (!isMeP2) onlineApplyItemsFromNames(2, u2.itemNames);
+                    const idx2 = typeof u2.panelIdx === 'number' ? u2.panelIdx : 0;
+                    onlineApplyPanelVisual(2, idx2);
+                }
+                updateStats(p1, 1);
+                updateStats(p2, 2);
+                renderItems();
+            } finally {
+                __onlineApplyingRemote = false;
+            }
+
+            if (peer) {
+                if (u1 && u2) {
+                    peer.textContent = `User1 ready: ${u1.ready ? '✓' : '…'} · User2 ready: ${u2.ready ? '✓' : '…'} (each needs ${ONLINE_ITEM_COUNT} items)`;
+                } else {
+                    peer.textContent = 'Waiting for a second player to join…';
+                }
+            }
+
+            const chk = document.getElementById('onlineReadyCheckbox');
+            if (chk && myIdx >= 0) {
+                const mine = docs[myIdx];
+                if (mine && typeof mine.ready === 'boolean' && document.activeElement !== chk) {
+                    chk.checked = mine.ready;
+                }
+            }
+
+            if (u1 && u2 && u1.ready && u2.ready && !window.__inBattle && !__onlineBattleLock) {
+                const n1 = (u1.itemNames || []).length;
+                const n2 = (u2.itemNames || []).length;
+                if (n1 === ONLINE_ITEM_COUNT && n2 === ONLINE_ITEM_COUNT) {
+                    const seed = onlineComputeBattleSeed(u1, u2);
+                    if (__onlineLastAutoSeed !== seed) {
+                        __onlineLastAutoSeed = seed;
+                        __onlineBattleLock = true;
+                        __onlineApplyingRemote = true;
+                        try {
+                            if (u1.displayName) p1Name = u1.displayName;
+                            if (u2.displayName) p2Name = u2.displayName;
+                            onlineApplyItemsFromNames(1, u1.itemNames);
+                            onlineApplyItemsFromNames(2, u2.itemNames);
+                            onlineApplyPanelVisual(1, typeof u1.panelIdx === 'number' ? u1.panelIdx : 0);
+                            onlineApplyPanelVisual(2, typeof u2.panelIdx === 'number' ? u2.panelIdx : 0);
+                            updateStats(p1, 1);
+                            updateStats(p2, 2);
+                            renderItems();
+                        } finally {
+                            __onlineApplyingRemote = false;
+                        }
+                        window.__battleRngSeed = seed;
+                        window.__onlinePvpStarting = true;
+                        startBattle();
+                    }
+                }
+            }
+
+            if (myIdx >= 0) {
+                const mine = docs[myIdx];
+                if (mine && (!mine.displayName || String(mine.displayName).trim() === '') && __onlineMySlot) {
+                    scheduleOnlinePush();
+                }
+            }
+        }
+            if (!window.firebaseReady || !window.db || !window.auth?.currentUser) {
+                showToast('Firebase not ready. Wait a moment and try again.', 'error');
+                return false;
+            }
+            const col = onlineParticipantsCollectionRef();
+            let snap;
+            try {
+                snap = await window.getDocs(col);
+            } catch (e) {
+                console.error(e);
+                showToast('Could not reach online lobby.', 'error');
+                return false;
+            }
+            if (snap.size >= ONLINE_MAX_PARTICIPANTS) {
+                showToast('Global lobby is full (10 users). Try again later.', 'error');
+                return false;
+            }
+            const uid = window.auth.currentUser.uid;
+            try {
+                await window.setDoc(onlineParticipantDocRef(uid), {
+                    joinedAt: Date.now(),
+                    displayName: '',
+                    itemNames: [],
+                    panelIdx: 0,
+                    ready: false
+                }, { merge: true });
+            } catch (e) {
+                console.error(e);
+                showToast('Failed to join online lobby.', 'error');
+                return false;
+            }
+            if (onlinePvpUnsubscribe) onlinePvpUnsubscribe();
+            onlinePvpUnsubscribe = window.onSnapshot(col, onlineProcessParticipantsSnapshot);
+            return true;
+        }
+        async function leaveOnlinePvpLobby() {
+            if (onlinePvpUnsubscribe) {
+                onlinePvpUnsubscribe();
+                onlinePvpUnsubscribe = null;
+            }
+            window.onlinePvpActive = false;
+            __onlineMySlot = 0;
+            __onlineBattleLock = false;
+            __onlineLastAutoSeed = null;
+            window.__onlinePvpStarting = false;
+            document.getElementById('fighters')?.classList.remove('md:flex-row-reverse');
+            const row = document.getElementById('onlinePvpReadyRow');
+            if (row) row.classList.add('hidden');
+            const btn = document.getElementById('onlinePvpToggleBtn');
+            if (btn) { btn.textContent = 'Online PvP: Off'; btn.classList.remove('ring-4', 'ring-emerald-300'); }
+            const startBtn = document.getElementById('startButton');
+            if (startBtn) startBtn.style.display = 'inline-block';
+            onlineSetControlsForSlot();
+            if (window.firebaseReady && window.db && window.auth?.currentUser) {
+                try {
+                    await window.deleteDoc(onlineParticipantDocRef(window.auth.currentUser.uid));
+                } catch (_) {}
+            }
+        }
+        async function toggleOnlinePvp() {
+            if (mode !== 'pvp') {
+                showToast('Switch to PvP mode first.', 'error');
+                return;
+            }
+            if (!window.firebaseReady) {
+                showToast('Firebase not ready.', 'error');
+                return;
+            }
+            const btn = document.getElementById('onlinePvpToggleBtn');
+            if (window.onlinePvpActive) {
+                await leaveOnlinePvpLobby();
+                showToast('Left online lobby.', 'success');
+                return;
+            }
+            const ok = await joinOnlinePvpLobby();
+            if (!ok) return;
+            window.onlinePvpActive = true;
+            if (btn) { btn.textContent = 'Online PvP: On'; btn.classList.add('ring-4', 'ring-emerald-300'); }
+            const readyRow = document.getElementById('onlinePvpReadyRow');
+            if (readyRow) readyRow.classList.remove('hidden');
+            const startBtn = document.getElementById('startButton');
+            if (startBtn) startBtn.style.display = 'none';
+            onlineSetControlsForSlot();
+            showToast('Online PvP enabled — you are in the global lobby.', 'success');
+        }
 
         const monsterDeathMessages = {
             'Rat': 'Gnawed to death by a Rat, somehow',
@@ -3145,7 +3589,8 @@
             });
         }
 
-        function initModeSelection() {
+        async function initModeSelection() {
+            await leaveOnlinePvpLobby();
             // Show mode buttons and default PvP controls for Player 2 until selection
             const overlay = document.getElementById('modeOverlay');
             if (overlay) overlay.classList.remove('hidden');
@@ -3205,7 +3650,8 @@
             if (f2) f2.classList.remove('panel-blur-dim');
             updateStats(p2, 2);
         }
-        function startCampaign() {
+        async function startCampaign() {
+            await leaveOnlinePvpLobby();
             mode = 'campaign';
             floor = 1;
             window.__gameMode = mode; window.__gameFloor = floor;
@@ -3620,9 +4066,24 @@
         }
         // Removed skipToFloor10 feature
         function startBattle() {
+            if (window.onlinePvpActive) {
+                if (!window.__onlinePvpStarting) return;
+                window.__onlinePvpStarting = false;
+            }
             // Reset turn counter at the start of every battle (PvP and Campaign)
             turnCounter = 0;
             window.__inBattle = true;
+            (function initBattleRng() {
+                let seed;
+                if (typeof window.__battleRngSeed === 'number' && Number.isFinite(window.__battleRngSeed)) {
+                    seed = window.__battleRngSeed >>> 0;
+                } else {
+                    seed = (Date.now() ^ (Math.floor(Math.random() * 0x100000000) >>> 0)) >>> 0;
+                }
+                if (seed === 0) seed = 0xdeadbeef;
+                window.__battleRngLastSeed = seed;
+                resetBattleRng(seed);
+            })();
             window.scrollTo(0, 0);
 
             document.querySelectorAll('#items button').forEach(btn => btn.disabled = true);
@@ -3735,7 +4196,7 @@
                     const enemy = index === 0 ? battleP2 : battleP1;
                     const enemyName = index === 0 ? p2Name : p1Name;
                     if (enemy.inv && enemy.inv.length > 0) {
-                        const randIdx = Math.floor(Math.random() * enemy.inv.length);
+                        const randIdx = battleRandomInt(enemy.inv.length);
                         const removed = enemy.inv.splice(randIdx, 1)[0];
                         updateStats(enemy, index === 0 ? 2 : 1);
                         log(`${playerName}'s Cosmic Soap removes ${enemyName}'s ${removed.name}! 🧼`);
@@ -3868,7 +4329,7 @@
                 }
 
                 // Roll for this turn
-                const heads = Math.random() < 0.5;
+                const heads = battleRandom() < 0.5;
                 if (heads) {
                     playerObj.coinFlipHeadsThisTurn = true;
                     playerObj.coinFlipTailsThisTurn = false;
@@ -3891,7 +4352,7 @@
             if (playerObj.randomAtkPerTurnMax > 0) {
                 const min = playerObj.randomAtkPerTurnMin || 0;
                 const max = playerObj.randomAtkPerTurnMax;
-                playerObj.randomAtkThisTurn = Math.floor(Math.random() * (max - min + 1)) + min;
+                playerObj.randomAtkThisTurn = battleRandomInt(max - min + 1) + min;
                 playerObj.currentAtk = Math.max(0, playerObj.currentAtk - (playerObj._prevRandomAtk || 0));
                 playerObj.currentAtk += playerObj.randomAtkThisTurn;
                 playerObj._prevRandomAtk = playerObj.randomAtkThisTurn;
@@ -4259,6 +4720,7 @@
                 log(winnerMessage);
                 clearInterval(battleInterval);
                 window.__inBattle = false;
+                resetBattleRng(null);
                 const turnEl = document.getElementById('turnCounterVisual');
                 if (turnEl) turnEl.style.display = 'none';
                 const gdbg = document.getElementById('globalDebugKillButton');
@@ -4526,8 +4988,20 @@
                     }
                 } else {
                     const sb = document.getElementById('startButton');
-                    if (sb) { sb.style.display = 'inline-block'; sb.disabled = false; }
-                document.getElementById('rematchButton').style.display = 'inline-block';
+                    if (sb) {
+                        if (window.onlinePvpActive) sb.style.display = 'none';
+                        else { sb.style.display = 'inline-block'; sb.disabled = false; }
+                    }
+                    if (!window.onlinePvpActive) {
+                        document.getElementById('rematchButton').style.display = 'inline-block';
+                    }
+                }
+                if (window.onlinePvpActive) {
+                    __onlineBattleLock = false;
+                    __onlineLastAutoSeed = null;
+                    const chk = document.getElementById('onlineReadyCheckbox');
+                    if (chk) chk.checked = false;
+                    onlinePushMyParticipant({ ready: false });
                 }
             }
             return battleEnded;
@@ -4539,7 +5013,7 @@
             const attackerFighterId = `fighter${attNum}`;
 
             // Pre-attack self-stun (Volatile Fuse)
-            if (!isDoubleAttack && attacker.selfStunChanceOnAttack > 0 && Math.random() < attacker.selfStunChanceOnAttack) {
+            if (!isDoubleAttack && attacker.selfStunChanceOnAttack > 0 && battleRandom() < attacker.selfStunChanceOnAttack) {
                 attacker.stunnedTurns = 1;
                 log(`${attackerName} is stunned by Volatile Fuse! 🧨`);
                 return;
@@ -4570,7 +5044,7 @@
             // Instakill check (on CRIT only) — counts forced crits (e.g., 3/4 Metronome) as CRITs
             {
                 const forceCrit = !!attacker._forcedCritNextAttack;
-                if (attacker.instakillOnZeroDef && defender.currentDef <= 0 && !defender.immuneToCrits && (forceCrit || Math.random() < attacker.currentCritChance)) {
+                if (attacker.instakillOnZeroDef && defender.currentDef <= 0 && !defender.immuneToCrits && (forceCrit || battleRandom() < attacker.currentCritChance)) {
                     if (forceCrit) attacker._forcedCritNextAttack = false;
                 log(`${attackerName}'s Hidden Dagger finds a fatal opening! ${defenderName} is instantly defeated! ☠️`);
                 defender.currentHp = 0;
@@ -4581,7 +5055,7 @@
             }
             // Assassin's Cloak: Instakill effect removed
             // Dodge check
-            if (Math.random() < defender.currentDodgeChance && !attacker.noDodgeAttack && !defender.noDodge) {
+            if (battleRandom() < defender.currentDodgeChance && !attacker.noDodgeAttack && !defender.noDodge) {
                 log(`${defenderName} dodges the attack! 💨`);
                 const fighterEl = document.getElementById(defenderFighterId);
                 fighterEl.classList.add('dodge-flash');
@@ -4665,7 +5139,7 @@
             let isCritical = false;
             let floatingTextClass = 'damage';
             const forceCrit = !!attacker._forcedCritNextAttack;
-            if ((forceCrit || Math.random() < attacker.currentCritChance) && !defender.immuneToCrits) {
+            if ((forceCrit || battleRandom() < attacker.currentCritChance) && !defender.immuneToCrits) {
                 rawDamage *= (2 + attacker.critDamageBonus);
                 isCritical = true;
                 log(`Critical Hit! 💥`);
@@ -4716,7 +5190,7 @@
                     defender.healReductionTurns = Math.max(defender.healReductionTurns || 0, 1);
                     log(`${defenderName}'s healing is reduced by ${(attacker.healReductionOnCritPercent*100).toFixed(0)}% for 1 turn! ⛓️`);
                 }
-            } else if (defender.immuneToCrits && Math.random() < attacker.currentCritChance) {
+            } else if (defender.immuneToCrits && battleRandom() < attacker.currentCritChance) {
                 log(`${defenderName} is immune to the critical hit!`);
             }
 
@@ -4916,7 +5390,7 @@
                 }
                 // Antibodies healing occurs during poison tick phase only
                 // D20: small chance to deal massive damage on a successful hit
-                if (attacker.deathDieChance > 0 && Math.random() < attacker.deathDieChance) {
+                if (attacker.deathDieChance > 0 && battleRandom() < attacker.deathDieChance) {
                     if (!(defender.invulnerableTurnsRemaining && defender.invulnerableTurnsRemaining > 0)) {
                         defender.currentHp = Math.max(0, defender.currentHp - attacker.deathDieDamage);
                         log(`${attackerName}'s D20 triggers! -${attacker.deathDieDamage} HP to ${defenderName}! 🎲`);
@@ -4934,10 +5408,10 @@
                 }
                 if (!isDoubleAttack && Number(attacker.randomDebuffOnHitAmount) > 0) {
                     const choices = ['atk', 'def', 'spd'];
-                    const debuffType = choices[Math.floor(Math.random()*choices.length)];
+                    const debuffType = choices[battleRandomInt(choices.length)];
                     const amount = Number(attacker.randomDebuffOnHitAmount) || 0;
                     if (amount > 0) {
-                        if (defender.debuffReflectChance > 0 && Math.random() < defender.debuffReflectChance) {
+                        if (defender.debuffReflectChance > 0 && battleRandom() < defender.debuffReflectChance) {
                             if (debuffType === 'atk') attacker.currentAtk = Math.max(0, attacker.currentAtk - amount);
                             if (debuffType === 'def') attacker.currentDef = Math.max(0, attacker.currentDef - amount);
                             if (debuffType === 'spd') attacker.currentSpd = Math.max(0, attacker.currentSpd - amount);
@@ -4969,7 +5443,7 @@
                     updateStats(defender, defNum, true);
                 }
             }
-                if (attacker.stunChance > 0 && Math.random() < attacker.stunChance) {
+                if (attacker.stunChance > 0 && battleRandom() < attacker.stunChance) {
                     defender.stunnedTurns = 1;
                     log(`${defenderName} is stunned! ⚡`);
                 }
@@ -4992,7 +5466,7 @@
                 // Jelly Mantle conditional stun on taking small damage
                 if (defender.stunAttackerOnDamageChance > 0 && finalDamage > 0) {
                     const threshold = defender.onlyStunIfDamageBelow || Infinity;
-                    if (finalDamage < threshold && Math.random() < defender.stunAttackerOnDamageChance) {
+                    if (finalDamage < threshold && battleRandom() < defender.stunAttackerOnDamageChance) {
                         attacker.stunnedTurns = 1;
                         log(`${attackerName} is stunned by Jelly Mantle! 🪼`);
                     }
@@ -5004,7 +5478,7 @@
                 }
                 // Reflectible stat debuffs (Warding Eye)
                 if (attacker.defDebuffOnHit > 0) {
-                    if (defender.debuffReflectChance > 0 && Math.random() < defender.debuffReflectChance) {
+                    if (defender.debuffReflectChance > 0 && battleRandom() < defender.debuffReflectChance) {
                         attacker.currentDef = Math.max(0, attacker.currentDef * (1 - attacker.defDebuffOnHit));
                         log(`${defenderName}'s Warding Eye reflects debuff: DEF reduced on ${attackerName}! 🧿`);
                         highlightStat(`def${attNum}`, 'decrease');
@@ -5017,7 +5491,7 @@
                     }
                 }
                 if (attacker.defFlatDebuffOnHit > 0) {
-                    if (defender.debuffReflectChance > 0 && Math.random() < defender.debuffReflectChance) {
+                    if (defender.debuffReflectChance > 0 && battleRandom() < defender.debuffReflectChance) {
                         attacker.currentDef = Math.max(0, attacker.currentDef - attacker.defFlatDebuffOnHit);
                         log(`${defenderName}'s Warding Eye reflects debuff: -${attacker.defFlatDebuffOnHit} DEF to ${attackerName}! 🧿`);
                         highlightStat(`def${attNum}`, 'decrease');
@@ -5030,7 +5504,7 @@
                     }
                 }
                 if (attacker.atkDebuffOnHit > 0) {
-                    if (defender.debuffReflectChance > 0 && Math.random() < defender.debuffReflectChance) {
+                    if (defender.debuffReflectChance > 0 && battleRandom() < defender.debuffReflectChance) {
                         attacker.currentAtk = Math.max(0, attacker.currentAtk * (1 - attacker.atkDebuffOnHit));
                         log(`${defenderName}'s Warding Eye reflects debuff: ATK reduced on ${attackerName}! 🧿`);
                         highlightStat(`atk${attNum}`, 'decrease');
@@ -5043,7 +5517,7 @@
                     }
                 }
             if (attacker.spdDebuffNextTurnOnHit > 0) {
-                if (defender.debuffReflectChance > 0 && Math.random() < defender.debuffReflectChance) {
+                if (defender.debuffReflectChance > 0 && battleRandom() < defender.debuffReflectChance) {
                     attacker.nextTurnSpdDebuff = Math.max(attacker.nextTurnSpdDebuff || 0, attacker.spdDebuffNextTurnOnHit);
                     log(`${defenderName}'s Warding Eye reflects debuff: ${attackerName} will lose ${attacker.spdDebuffNextTurnOnHit} SPD next turn! 🧿`);
                 } else {
@@ -5052,7 +5526,7 @@
                 }
             }
             if (attacker.dodgeDebuffNextTurnOnHit > 0) {
-                if (defender.debuffReflectChance > 0 && Math.random() < defender.debuffReflectChance) {
+                if (defender.debuffReflectChance > 0 && battleRandom() < defender.debuffReflectChance) {
                     attacker.nextTurnDodgeDebuff = Math.max(attacker.nextTurnDodgeDebuff || 0, attacker.dodgeDebuffNextTurnOnHit);
                     log(`${defenderName}'s Warding Eye reflects debuff: ${attackerName} will lose ${(attacker.dodgeDebuffNextTurnOnHit*100).toFixed(0)}% DODGE next turn! 🧿`);
                 } else {
@@ -5067,7 +5541,7 @@
             // Multi-attack Logic with Delay
             // Base: can double attack if has chance (cap 3 extras total normally)
             let remainingExtraAttacks = 0;
-            if (!isDoubleAttack && attacker.doubleAttackChance > 0 && Math.random() < attacker.doubleAttackChance) {
+            if (!isDoubleAttack && attacker.doubleAttackChance > 0 && battleRandom() < attacker.doubleAttackChance) {
                 remainingExtraAttacks = 1;
             }
             // Dual Daggers extension: if speed lead is sufficient, allow up to 3 total extras (4 total hits)
@@ -5094,8 +5568,9 @@
 
         }
 
-        function resetGame() {
+        async function resetGame() {
             clearInterval(battleInterval);
+            await leaveOnlinePvpLobby();
             turnCounter = 0;
             log('<p class="text-xl font-bold text-center text-gray-800 dark:text-gray-100 my-2">🔄 Game Reset! 🔄</p>');
             document.getElementById('log').innerHTML = '<p class="text-gray-500 italic">Battle log will appear here...</p>';
@@ -5125,6 +5600,10 @@
             initModeSelection();
         }
         function rematch() {
+            if (window.onlinePvpActive) {
+                showToast('Rematch is disabled in Online PvP — uncheck Ready and start a new fight.', 'error');
+                return;
+            }
             log('<p class="text-xl font-bold text-center text-gray-800 dark:text-gray-100 my-2">⚔️ Rematch with Same Items! ⚔️</p>');
             
             // Reset battle state but keep items
@@ -5158,6 +5637,12 @@
             startBattle();
         }
         // Make functions globally accessible
+        document.getElementById('onlinePvpToggleBtn')?.addEventListener('click', () => { void toggleOnlinePvp(); });
+        document.getElementById('onlineReadyCheckbox')?.addEventListener('change', (e) => {
+            if (!window.onlinePvpActive) return;
+            void onlinePushMyParticipant({ ready: !!e.target.checked });
+        });
+        window.toggleOnlinePvp = toggleOnlinePvp;
         window.openPresetsModal = openPresetsModal;
         window.randomizeItems = randomizeItems;
         window.startBattle = startBattle;
