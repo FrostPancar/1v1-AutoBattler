@@ -486,17 +486,17 @@
         <button type="button" id="onlinePvpToggleBtn" class="btn-gradient-emerald text-white font-bold py-3 px-6 rounded-full shadow-lg transition duration-300 ease-in-out transform hover:scale-105 focus:outline-none focus:ring-4 focus:ring-emerald-300">Online PvP: Off</button>
         <button onclick="rematch()" id="rematchButton" class="btn-gradient-yellow text-white font-bold py-3 px-6 rounded-full shadow-lg transition duration-300 ease-in-out transform hover:scale-105 focus:outline-none focus:ring-300" style="display: none;">Rematch</button>
     </div>
-    <div id="onlinePvpReadyRow" class="hidden w-full max-w-3xl mx-auto flex flex-col items-center gap-2 mb-4 text-center text-sm text-gray-700 dark:text-gray-300">
-        <p id="onlinePvpSlotLabel" class="font-semibold"></p>
-        <label class="inline-flex items-center gap-2 cursor-pointer select-none">
-            <input type="checkbox" id="onlineReadyCheckbox" class="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
+    <div id="onlinePvpReadyRow" class="hidden w-full max-w-3xl mx-auto flex flex-col items-center gap-2 mb-4 text-center text-sm text-white">
+        <p id="onlinePvpSlotLabel" class="font-semibold text-white"></p>
+        <label class="inline-flex items-center gap-2 cursor-pointer select-none text-white">
+            <input type="checkbox" id="onlineReadyCheckbox" class="h-4 w-4 rounded border-white/50 bg-white/10 text-blue-600 focus:ring-blue-400 focus:ring-offset-0" />
             <span>Ready to fight (both players must check this to start)</span>
         </label>
-        <p id="onlinePvpPeerStatus" class="text-xs text-gray-500 dark:text-gray-400"></p>
+        <p id="onlinePvpPeerStatus" class="text-xs text-white/80"></p>
     </div>
 
     <div id="itemSearchContainer" class="mt-6 mb-4 flex items-center justify-center" style="display:none">
-        <span id="itemSearchLabel" class="text-2xl font-bold text-gray-700 dark:text-gray-200 cursor-text">
+        <span id="itemSearchLabel" class="text-2xl font-bold text-white cursor-text drop-shadow-sm">
             Choose Items (Up to 4 per player)
         </span>
         <input id="itemSearchInput" type="text" placeholder="Search items..."
@@ -2873,6 +2873,13 @@
         function onlineParticipantDocRef(uid) {
             return window.doc(window.db, 'onlinePvpLobby', 'global', 'participants', uid);
         }
+        /** Earlier joinedAt = User1 slot; ties broken by uid so all clients agree (Firestore doc order alone can differ per client). */
+        function onlineParticipantsSortCompare(a, b) {
+            const ta = a.joinedAt || 0;
+            const tb = b.joinedAt || 0;
+            if (ta !== tb) return ta - tb;
+            return String(a.uid || '').localeCompare(String(b.uid || ''));
+        }
         function onlineFnv1a32(str) {
             let h = 2166136261 >>> 0;
             const s = String(str || '');
@@ -2883,8 +2890,8 @@
             return h >>> 0;
         }
         function onlineComputeBattleSeed(a, b) {
-            const u1 = a.joinedAt <= b.joinedAt ? a : b;
-            const u2 = a.joinedAt <= b.joinedAt ? b : a;
+            const u1 = onlineParticipantsSortCompare(a, b) <= 0 ? a : b;
+            const u2 = onlineParticipantsSortCompare(a, b) <= 0 ? b : a;
             const pack = [u1.uid, u2.uid, (u1.itemNames || []).join(','), (u2.itemNames || []).join(',')].join('|');
             const s = onlineFnv1a32(pack);
             return s === 0 ? 0xfeedface : s;
@@ -2948,7 +2955,8 @@
             const itemNames = slot === 2 ? p2.inv.map(i => i.name) : p1.inv.map(i => i.name);
             const panelIdx = slot === 2 ? (window.p2PanelColorIdxOnline ?? 0) : (window.p1PanelColorIdxOnline ?? 0);
             const ready = !!(document.getElementById('onlineReadyCheckbox') && document.getElementById('onlineReadyCheckbox').checked);
-            const payload = { displayName, itemNames, panelIdx, ready, joinedAt: Date.now(), ...extra };
+            // Do not refresh joinedAt here — it would reorder slots and tie with other users' timestamps.
+            const payload = { displayName, itemNames, panelIdx, ready, ...extra };
             try {
                 await window.setDoc(onlineParticipantDocRef(uid), payload, { merge: true });
             } catch (e) {
@@ -3013,7 +3021,7 @@
         function onlineProcessParticipantsSnapshot(snapshot) {
             if (!window.onlinePvpActive) return;
             const docs = snapshot.docs.map(d => ({ ...d.data(), uid: d.id }));
-            docs.sort((a, b) => (a.joinedAt || 0) - (b.joinedAt || 0));
+            docs.sort(onlineParticipantsSortCompare);
             const myUid = window.auth?.currentUser?.uid;
             const myIdx = docs.findIndex(x => x.uid === myUid);
             const prevSlot = __onlineMySlot;
@@ -3138,6 +3146,7 @@
                 showToast('Failed to join online lobby.', 'error');
                 return false;
             }
+            window.onlinePvpActive = true;
             if (onlinePvpUnsubscribe) onlinePvpUnsubscribe();
             onlinePvpUnsubscribe = window.onSnapshot(col, onlineProcessParticipantsSnapshot);
             return true;
@@ -3183,7 +3192,6 @@
             }
             const ok = await joinOnlinePvpLobby();
             if (!ok) return;
-            window.onlinePvpActive = true;
             if (btn) { btn.textContent = 'Online PvP: On'; btn.classList.add('ring-4', 'ring-emerald-300'); }
             const readyRow = document.getElementById('onlinePvpReadyRow');
             if (readyRow) readyRow.classList.remove('hidden');
