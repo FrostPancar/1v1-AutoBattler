@@ -1,0 +1,25 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Shared builds: readable by anyone; writes require a signed-in user (incl. anonymous).
+    match /presets/{presetId} {
+      allow read: if true;
+      allow create: if request.auth != null
+        && request.resource.data.items is list
+        && request.resource.data.items.size() > 0
+        && request.resource.data.items.size() <= 50;
+      allow update: if false;
+      allow delete: if request.auth != null
+        && (!resource.data.keys().hasAny(['creatorId']) || resource.data.creatorId == request.auth.uid);
+    }
+
+    match /hallOfFame/{entryId} {
+      allow read: if true;
+      allow create: if request.auth != null
+        && request.resource.data.items is list
+        && request.resource.data.items.size() > 0
+        && request.resource.data.items.size() <= 50;
+      allow update, delete: if false;
+    }
+  }
+}

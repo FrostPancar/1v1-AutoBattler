@@ -1,0 +1,5 @@
+---
+description: Run "cd /Users/ataberkol/Desktop/1v1AutoBattler && ./deploy.sh | cat" in terminal
+globs:
+alwaysApply: false
+---
