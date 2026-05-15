@@ -3106,6 +3106,7 @@
                 }
             }
         }
+        async function joinOnlinePvpLobby() {
             if (!window.firebaseReady || !window.db || !window.auth?.currentUser) {
                 showToast('Firebase not ready. Wait a moment and try again.', 'error');
                 return false;
